@@ -1,5 +1,5 @@
 import pkg from '@whiskeysockets/baileys';
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = pkg;
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, delay } = pkg;
 import express from 'express';
 import QRCode from 'qrcode';
 
@@ -15,20 +15,29 @@ let sock = null;
 let isConnected = false;
 
 async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState('/tmp/auth_info_baileys');
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
   sock = makeWASocket({
     auth: state,
     printQRInTerminal: true,
-    browser: Browsers.macOS('Desktop'),
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 10000,
+    retryRequestDelayMs: 2000,
   });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      qrCodeData = await QRCode.toDataURL(qr);
-      console.log('QR Code gerado!');
+      console.log('QR Code recebido, gerando imagem...');
+      try {
+        qrCodeData = await QRCode.toDataURL(qr);
+        console.log('QR Code gerado com sucesso!');
+      } catch (err) {
+        console.error('Erro ao gerar QR:', err);
+      }
     }
 
     if (connection === 'open') {
@@ -39,10 +48,12 @@ async function startBot() {
 
     if (connection === 'close') {
       isConnected = false;
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log('Desconectado. Código:', statusCode, 'Reconectar:', shouldReconnect);
       if (shouldReconnect) {
-        console.log('Reconectando...');
-        setTimeout(startBot, 5000);
+        await delay(5000);
+        startBot();
       }
     }
   });
@@ -55,8 +66,6 @@ async function startBot() {
 
     const sender = msg.key.remoteJid;
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-
-    if (!text) return;
     console.log(`Mensagem de ${sender}: ${text}`);
 
     try {
@@ -70,23 +79,27 @@ async function startBot() {
       });
 
       const data = await response.json();
-      const reply = data.response || 'Oi! Estou aqui.';
-
-      await new Promise(r => setTimeout(r, 2000 + Math.random() * 2000));
+      const reply = data.response || 'Desculpa, algo deu errado.';
       await sock.sendMessage(sender, { text: reply });
     } catch (error) {
-      console.error('Erro:', error);
+      console.error('Erro ao processar mensagem:', error);
     }
   });
 }
 
-app.get('/', (req, res) => res.json({ status: 'online', connected: isConnected }));
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
-app.get('/status', (req, res) => res.json({ connected: isConnected }));
+app.get('/', (req, res) => {
+  res.json({ status: 'Bot rodando', connected: isConnected });
+});
+
 app.get('/qrcode', (req, res) => {
-  if (isConnected) return res.json({ connected: true, message: 'Já conectado!' });
-  if (!qrCodeData) return res.json({ waiting: true, message: 'Gerando QR Code, aguarde 30 segundos e recarregue.' });
-  res.send(`<html><body style="background:#000;display:flex;align-items:center;justify-content:center;height:100vh"><img src="${qrCodeData}" style="width:300px"/></body></html>`);
+  if (!qrCodeData) {
+    return res.json({ waiting: true, message: 'Gerando QR Code, aguarde 30 segundos e recarregue.' });
+  }
+  res.send(`<html><body style="background:#000;display:flex;align-items:center;justify-content:center;height:100vh"><img src="${qrCodeData}" style="width:300px;height:300px"/></body></html>`);
+});
+
+app.get('/status', (req, res) => {
+  res.json({ connected: isConnected });
 });
 
 app.listen(PORT, () => {
